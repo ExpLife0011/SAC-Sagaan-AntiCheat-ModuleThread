@@ -63,7 +63,7 @@ NTSTATUS TerminatingProcess(ULONG targetPid)
 	return NtRet;
 }
 
-OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation)
+OB_PREOP_CALLBACK_STATUS ProcessPreCallback(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation)
 {
 	UNREFERENCED_PARAMETER(RegistrationContext);
 
@@ -82,6 +82,7 @@ OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATIO
 	PEPROCESS Csrss1Process;
 	PEPROCESS Csrss2Process;
 	PEPROCESS ProtectedProcessProcess;
+	PEPROCESS USERMODEPROGRAMProcess;
 
 	PEPROCESS OpenedProcess = (PEPROCESS)OperationInformation->Object,
 		CurrentProcess = PsGetCurrentProcess();
@@ -89,7 +90,7 @@ OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATIO
 	PsLookupProcessByProcessId(CSGO, &ProtectedProcessProcess); // Getting the PEPROCESS using the PID 
 	PsLookupProcessByProcessId(CSRSS, &Csrss1Process); // Getting the PEPROCESS using the PID 
 	PsLookupProcessByProcessId(CSRSS2, &Csrss2Process); // Getting the PEPROCESS using the PID 
-
+	PsLookupProcessByProcessId(USERMODEPROGRAM, &USERMODEPROGRAMProcess); // Getting the PEPROCESS using the PID 
 
 	if (OpenedProcess == Csrss1Process) // Making sure to not strip csrss's Handle, will cause BSOD
 		return OB_PREOP_SUCCESS;
@@ -97,7 +98,7 @@ OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATIO
 	if (OpenedProcess == Csrss2Process) // Making sure to not strip csrss's Handle, will cause BSOD
 		return OB_PREOP_SUCCESS;
 
-	if (OpenedProcess == ProtectedProcessProcess) // Making sure that the game can open a process handle to itself
+	if (OpenedProcess == USERMODEPROGRAMProcess) // Making sure to not strip csrss's Handle, will cause BSOD
 		return OB_PREOP_SUCCESS;
 
 	if (OperationInformation->KernelHandle) // allow drivers to get a handle
@@ -121,47 +122,90 @@ OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATIO
 	}
 }
 
-// This happens after everything. 
-VOID PostCallBack(PVOID RegistrationContext, POB_POST_OPERATION_INFORMATION OperationInformation)
+OB_PREOP_CALLBACK_STATUS ThreadPreCallback(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation)
 {
 	UNREFERENCED_PARAMETER(RegistrationContext);
-	UNREFERENCED_PARAMETER(OperationInformation);
+
+	if (CSGO == 0)
+		return OB_PREOP_SUCCESS;
+
+	if (USERMODEPROGRAM == 0)
+		return OB_PREOP_SUCCESS;
+
+	if (CSRSS == 0)
+		return OB_PREOP_SUCCESS;
+
+	if (CSRSS2 == 0)
+		return OB_PREOP_SUCCESS;
+
+	PEPROCESS Csrss1Process;
+	PEPROCESS Csrss2Process;
+	PEPROCESS ProtectedProcessProcess;
+	PEPROCESS USERMODEPROGRAMProcess;
+
+	PEPROCESS OpenedProcess = (PEPROCESS)OperationInformation->Object,
+		CurrentProcess = PsGetCurrentProcess();
+
+	PsLookupProcessByProcessId(CSGO, &ProtectedProcessProcess); // Getting the PEPROCESS using the PID 
+	PsLookupProcessByProcessId(CSRSS, &Csrss1Process); // Getting the PEPROCESS using the PID 
+	PsLookupProcessByProcessId(CSRSS2, &Csrss2Process); // Getting the PEPROCESS using the PID 
+	PsLookupProcessByProcessId(USERMODEPROGRAM, &USERMODEPROGRAMProcess); // Getting the PEPROCESS using the PID 
+
+	if (OpenedProcess == Csrss1Process) // Making sure to not strip csrss's Handle, will cause BSOD
+		return OB_PREOP_SUCCESS;
+
+	if (OpenedProcess == Csrss2Process) // Making sure to not strip csrss's Handle, will cause BSOD
+		return OB_PREOP_SUCCESS;
+
+	if (OpenedProcess == USERMODEPROGRAMProcess) // Making sure to not strip csrss's Handle, will cause BSOD
+		return OB_PREOP_SUCCESS;
+
+	if (OperationInformation->KernelHandle) // allow drivers to get a handle
+		return OB_PREOP_SUCCESS;
+
+
+	// PsGetProcessId((PEPROCESS)OperationInformation->Object) equals to the created handle's PID, so if the created Handle equals to the protected process's PID, strip
+	if (PsGetProcessId(OperationInformation->Object) == CSGO)
+	{
+
+		if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) // striping handle 
+		{
+			OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = (SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION);
+		}
+		else
+		{
+			OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = (SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION);
+		}
+
+		return OB_PREOP_SUCCESS;
+	}
 }
+
 
 NTSTATUS CallBackHandle;
 PVOID ObHandle = NULL;
 VOID EnableObRegisterCallBack()
 {
+	OB_OPERATION_REGISTRATION g_regOperation[2];
+	OB_CALLBACK_REGISTRATION g_regCallback;
 
-	OB_OPERATION_REGISTRATION OBOperationRegistration;
-	OB_CALLBACK_REGISTRATION OBOCallbackRegistration;
-	REG_CONTEXT regContext;
-	UNICODE_STRING usAltitude;
-	memset(&OBOperationRegistration, 0, sizeof(OB_OPERATION_REGISTRATION));
-	memset(&OBOCallbackRegistration, 0, sizeof(OB_CALLBACK_REGISTRATION));
-	memset(&regContext, 0, sizeof(REG_CONTEXT));
-	regContext.ulIndex = 1;
-	regContext.Version = 120;
-	RtlInitUnicodeString(&usAltitude, L"1000");
+	g_regOperation[0].ObjectType = PsProcessType;
+	g_regOperation[0].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+	g_regOperation[0].PreOperation = ProcessPreCallback;
+	g_regOperation[0].PostOperation = NULL;
 
-	if ((USHORT)ObGetFilterVersion() == OB_FLT_REGISTRATION_VERSION)
-	{
-		OBOperationRegistration.ObjectType = PsProcessType; // Use To Strip Handle Permissions For Threads PsThreadType
-		OBOperationRegistration.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
-		OBOperationRegistration.PostOperation = PostCallBack; // Giving the function which happens after creating
-		OBOperationRegistration.PreOperation = PreCallback; // Giving the function which happens before creating
+	g_regOperation[1].ObjectType = PsThreadType;
+	g_regOperation[1].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+	g_regOperation[1].PreOperation = ThreadPreCallback;
+	g_regOperation[1].PostOperation = NULL;
 
-		// Setting the altitude of the driver
-		OBOCallbackRegistration.Altitude = usAltitude;
-		OBOCallbackRegistration.OperationRegistration = &OBOperationRegistration;
-		OBOCallbackRegistration.RegistrationContext = &regContext;
-		OBOCallbackRegistration.Version = OB_FLT_REGISTRATION_VERSION;
-		OBOCallbackRegistration.OperationRegistrationCount = (USHORT)1;
+	g_regCallback.Version = OB_FLT_REGISTRATION_VERSION;
+	g_regCallback.OperationRegistrationCount = 2;
+	g_regCallback.RegistrationContext = NULL;
+	g_regCallback.OperationRegistration = g_regOperation;
+	RtlInitUnicodeString(&g_regCallback.Altitude, L"1000");
 
-		CallBackHandle = ObRegisterCallbacks(&OBOCallbackRegistration, &ObHandle); // Register The CallBack
-
-
-	}
+	CallBackHandle = ObRegisterCallbacks(&g_regCallback, &ObHandle);
 
 }
 
@@ -186,25 +230,12 @@ PLOAD_IMAGE_NOTIFY_ROUTINE ImageLoadCallback(PUNICODE_STRING FullImageName,
 	{
 		DbgPrintEx(0, 0, "CSGO: Loaded Modules. ProcessID = %d, ThreadID = %d, Full ImageInfo = %d \n",
 			ProcessId, ImageInfo, FullImageName->Buffer);
-		ModuleTesting2++;
 	}
 
 	if (ProcessId == USERMODEPROGRAM && USERMODEPROGRAM != 0)
 	{
 		DbgPrintEx(0, 0, "USERMODEPROGRAM: Loaded Modules. ProcessID = %d, ThreadID = %d, Full ImageInfo = %d \n",
 			ProcessId, ImageInfo, FullImageName->Buffer);
-		ModuleTesting++;
-	}
-
-	if (ModuleTesting > 1)
-	{
-		TerminatingProcess(CSGO);
-		TerminatingProcess(USERMODEPROGRAM);
-	}
-	if (ModuleTesting2 > 2)
-	{
-		TerminatingProcess(CSGO);
-		TerminatingProcess(USERMODEPROGRAM);
 	}
 
 }
@@ -229,22 +260,18 @@ VOID CreateThreadNotifyRoutine(
 			if (ThreadId == THREAD1)
 			{
 				TerminatingProcess(CSGO);
-				TerminatingProcess(USERMODEPROGRAM);
 			}
 			if (ThreadId == THREAD2)
 			{
 				TerminatingProcess(CSGO);
-				TerminatingProcess(USERMODEPROGRAM);
 			}
 			if (ThreadId == THREAD3)
 			{
 				TerminatingProcess(CSGO);
-				TerminatingProcess(USERMODEPROGRAM);
 			}
 			if (ThreadId == THREAD4)
 			{
 				TerminatingProcess(CSGO);
-				TerminatingProcess(USERMODEPROGRAM);
 			}
 
 			DbgPrintEx(0, 0, "USERMODEPROGRAM: Delete Thread. ProcessID = %d, ThreadID = %d \n",
