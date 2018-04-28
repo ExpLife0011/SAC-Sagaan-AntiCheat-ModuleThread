@@ -13,6 +13,8 @@
 // Request to read virtual user memory (memory of a program) from kernel space
 #define IO_THREADIDS_REQUEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0701 /* Our Custom Code */, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
 
+#define PROCESS_QUERY_LIMITED_INFORMATION      0x1000
+
 PDEVICE_OBJECT pDeviceObject; // our driver object
 UNICODE_STRING dev, dos; // Driver registry paths
 
@@ -31,6 +33,11 @@ ULONG THREAD4;
 
 BOOL ThreadID = FALSE;
 BOOL ProcessID = FALSE;
+
+NTSTATUS ImageCallback = STATUS_SUCCESS;
+NTSTATUS ThreadCallback = STATUS_SUCCESS;
+NTSTATUS HandleCallback = STATUS_SUCCESS;
+NTSTATUS Returned = STATUS_UNSUCCESSFUL;
 
 NTSTATUS UnloadDriver(PDRIVER_OBJECT pDriverObject);
 NTSTATUS CreateCall(PDEVICE_OBJECT DeviceObject, PIRP irp);
@@ -63,7 +70,7 @@ NTSTATUS TerminatingProcess(ULONG targetPid)
 	return NtRet;
 }
 
-OB_PREOP_CALLBACK_STATUS ProcessPreCallback(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation)
+OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation)
 {
 	UNREFERENCED_PARAMETER(RegistrationContext);
 
@@ -79,18 +86,19 @@ OB_PREOP_CALLBACK_STATUS ProcessPreCallback(PVOID RegistrationContext, POB_PRE_O
 	if (CSRSS2 == 0)
 		return OB_PREOP_SUCCESS;
 
+	PEPROCESS UserProcess;
 	PEPROCESS Csrss1Process;
 	PEPROCESS Csrss2Process;
 	PEPROCESS ProtectedProcessProcess;
-	PEPROCESS USERMODEPROGRAMProcess;
 
 	PEPROCESS OpenedProcess = (PEPROCESS)OperationInformation->Object,
 		CurrentProcess = PsGetCurrentProcess();
 
 	PsLookupProcessByProcessId(CSGO, &ProtectedProcessProcess); // Getting the PEPROCESS using the PID 
+	PsLookupProcessByProcessId(USERMODEPROGRAM, &UserProcess); // Getting the PEPROCESS using the PID 
 	PsLookupProcessByProcessId(CSRSS, &Csrss1Process); // Getting the PEPROCESS using the PID 
 	PsLookupProcessByProcessId(CSRSS2, &Csrss2Process); // Getting the PEPROCESS using the PID 
-	PsLookupProcessByProcessId(USERMODEPROGRAM, &USERMODEPROGRAMProcess); // Getting the PEPROCESS using the PID 
+
 
 	if (OpenedProcess == Csrss1Process) // Making sure to not strip csrss's Handle, will cause BSOD
 		return OB_PREOP_SUCCESS;
@@ -98,115 +106,79 @@ OB_PREOP_CALLBACK_STATUS ProcessPreCallback(PVOID RegistrationContext, POB_PRE_O
 	if (OpenedProcess == Csrss2Process) // Making sure to not strip csrss's Handle, will cause BSOD
 		return OB_PREOP_SUCCESS;
 
-	if (OpenedProcess == USERMODEPROGRAMProcess) // Making sure to not strip csrss's Handle, will cause BSOD
+	if (OpenedProcess == UserProcess) // make sure the driver isnt getting stripped ( even though we have a second check )
 		return OB_PREOP_SUCCESS;
+
 
 	if (OperationInformation->KernelHandle) // allow drivers to get a handle
 		return OB_PREOP_SUCCESS;
 
 
 	// PsGetProcessId((PEPROCESS)OperationInformation->Object) equals to the created handle's PID, so if the created Handle equals to the protected process's PID, strip
-	if (PsGetProcessId((PEPROCESS)OperationInformation->Object) == CSGO)
+	if (PsGetProcessId((PEPROCESS)OperationInformation->Object) == CSGO || PsGetProcessId((PEPROCESS)OperationInformation->Object) == USERMODEPROGRAM)
 	{
+		DbgPrintEx(0, 0, "ObRegisterCallback: Strip A Handle Permissions");
 
 		if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) // striping handle 
 		{
-			OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = (SYNCHRONIZE | 0x1000);
+			OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = (SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION);
 		}
 		else
 		{
-			OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = (SYNCHRONIZE | 0x1000);
+			OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = (SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION);
 		}
 
 		return OB_PREOP_SUCCESS;
 	}
 }
 
-OB_PREOP_CALLBACK_STATUS ThreadPreCallback(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation)
+// This happens after everything. 
+VOID PostCallBack(PVOID RegistrationContext, POB_POST_OPERATION_INFORMATION OperationInformation)
 {
 	UNREFERENCED_PARAMETER(RegistrationContext);
-
-	if (CSGO == 0)
-		return OB_PREOP_SUCCESS;
-
-	if (USERMODEPROGRAM == 0)
-		return OB_PREOP_SUCCESS;
-
-	if (CSRSS == 0)
-		return OB_PREOP_SUCCESS;
-
-	if (CSRSS2 == 0)
-		return OB_PREOP_SUCCESS;
-
-	PEPROCESS Csrss1Process;
-	PEPROCESS Csrss2Process;
-	PEPROCESS ProtectedProcessProcess;
-	PEPROCESS USERMODEPROGRAMProcess;
-
-	PEPROCESS OpenedProcess = (PEPROCESS)OperationInformation->Object,
-		CurrentProcess = PsGetCurrentProcess();
-
-	PsLookupProcessByProcessId(CSGO, &ProtectedProcessProcess); // Getting the PEPROCESS using the PID 
-	PsLookupProcessByProcessId(CSRSS, &Csrss1Process); // Getting the PEPROCESS using the PID 
-	PsLookupProcessByProcessId(CSRSS2, &Csrss2Process); // Getting the PEPROCESS using the PID 
-	PsLookupProcessByProcessId(USERMODEPROGRAM, &USERMODEPROGRAMProcess); // Getting the PEPROCESS using the PID 
-
-	if (OpenedProcess == Csrss1Process) // Making sure to not strip csrss's Handle, will cause BSOD
-		return OB_PREOP_SUCCESS;
-
-	if (OpenedProcess == Csrss2Process) // Making sure to not strip csrss's Handle, will cause BSOD
-		return OB_PREOP_SUCCESS;
-
-	if (OpenedProcess == USERMODEPROGRAMProcess) // Making sure to not strip csrss's Handle, will cause BSOD
-		return OB_PREOP_SUCCESS;
-
-	if (OperationInformation->KernelHandle) // allow drivers to get a handle
-		return OB_PREOP_SUCCESS;
-
-
-	// PsGetProcessId((PEPROCESS)OperationInformation->Object) equals to the created handle's PID, so if the created Handle equals to the protected process's PID, strip
-	if (PsGetProcessId(OperationInformation->Object) == CSGO)
-	{
-
-		if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) // striping handle 
-		{
-			OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = (SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION);
-		}
-		else
-		{
-			OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = (SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION);
-		}
-
-		return OB_PREOP_SUCCESS;
-	}
+	UNREFERENCED_PARAMETER(OperationInformation);
 }
 
-
-NTSTATUS CallBackHandle;
 PVOID ObHandle = NULL;
 VOID EnableObRegisterCallBack()
 {
-	OB_OPERATION_REGISTRATION g_regOperation[2];
-	OB_CALLBACK_REGISTRATION g_regCallback;
 
-	g_regOperation[0].ObjectType = PsProcessType;
-	g_regOperation[0].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
-	g_regOperation[0].PreOperation = ProcessPreCallback;
-	g_regOperation[0].PostOperation = NULL;
+	OB_OPERATION_REGISTRATION OBOperationRegistration;
+	OB_CALLBACK_REGISTRATION OBOCallbackRegistration;
+	REG_CONTEXT regContext;
+	UNICODE_STRING usAltitude;
+	memset(&OBOperationRegistration, 0, sizeof(OB_OPERATION_REGISTRATION));
+	memset(&OBOCallbackRegistration, 0, sizeof(OB_CALLBACK_REGISTRATION));
+	memset(&regContext, 0, sizeof(REG_CONTEXT));
+	regContext.ulIndex = 1;
+	regContext.Version = 120;
+	RtlInitUnicodeString(&usAltitude, L"389020");
 
-	g_regOperation[1].ObjectType = PsThreadType;
-	g_regOperation[1].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
-	g_regOperation[1].PreOperation = ThreadPreCallback;
-	g_regOperation[1].PostOperation = NULL;
+	if ((USHORT)ObGetFilterVersion() == OB_FLT_REGISTRATION_VERSION)
+	{
+		OBOperationRegistration.ObjectType = PsProcessType; // Use To Strip Handle Permissions For Threads PsThreadType
+		OBOperationRegistration.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+		OBOperationRegistration.PostOperation = PostCallBack; // Giving the function which happens after creating
+		OBOperationRegistration.PreOperation = PreCallback; // Giving the function which happens before creating
 
-	g_regCallback.Version = OB_FLT_REGISTRATION_VERSION;
-	g_regCallback.OperationRegistrationCount = 2;
-	g_regCallback.RegistrationContext = NULL;
-	g_regCallback.OperationRegistration = g_regOperation;
-	RtlInitUnicodeString(&g_regCallback.Altitude, L"1000");
+															// Setting the altitude of the driver
+		OBOCallbackRegistration.Altitude = usAltitude;
+		OBOCallbackRegistration.OperationRegistration = &OBOperationRegistration;
+		OBOCallbackRegistration.RegistrationContext = &regContext;
+		OBOCallbackRegistration.Version = OB_FLT_REGISTRATION_VERSION;
+		OBOCallbackRegistration.OperationRegistrationCount = 1;
 
-	CallBackHandle = ObRegisterCallbacks(&g_regCallback, &ObHandle);
+		HandleCallback = ObRegisterCallbacks(&OBOCallbackRegistration, &ObHandle); // Register The CallBack
+	}
 
+	if (HandleCallback != STATUS_SUCCESS)
+	{
+		DbgPrintEx(0, 0, "ObRegisterCallback: Returned = %d", HandleCallback);
+	}
+	else
+	{
+		DbgPrintEx(0, 0, "ObRegisterCallback: Returned = PASSED");
+	}
 }
 
 VOID PsCreateProcessNotify(
@@ -251,9 +223,21 @@ VOID CreateThreadNotifyRoutine(
 	{
 		if (Create)
 		{
-		
-			DbgPrintEx(0, 0, "USERMODEPROGRAM: Create Thread. ProcessID = %d, ThreadID = %d \n",
-				ProcessId, ThreadId);
+			if (THREAD1 != 0 ||
+				THREAD2 != 0 ||
+				THREAD3 != 0 ||
+				THREAD4 != 0)
+			{
+				if (ThreadId != THREAD1 ||
+					ThreadId != THREAD2 ||
+					ThreadId != THREAD3 ||
+					ThreadId != THREAD4
+					)
+				{
+					DbgPrintEx(0, 0, "USERMODEPROGRAM: Create Thread. ProcessID = %d, ThreadID = %d \n",
+						ProcessId, ThreadId);
+				}
+			}
 		}
 		else
 		{
@@ -456,19 +440,15 @@ typedef struct _LDR_DATA_TABLE_ENTRY
 } LDR_DATA_TABLE_ENTRY, *PLDR_DATA_TABLE_ENTRY;
 
 PDEVICE_OBJECT DeviceObject;
-
-
-
 // Driver Entrypoint
 NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject,
 	PUNICODE_STRING pRegistryPath)
 {
 	DbgPrintEx(0, 0, "SAC Driver Loaded\n");
 
-	PsSetLoadImageNotifyRoutine(ImageLoadCallback);
-	PsSetCreateThreadNotifyRoutine(CreateThreadNotifyRoutine);
+	ImageCallback = PsSetLoadImageNotifyRoutine(ImageLoadCallback);
+	ThreadCallback = PsSetCreateThreadNotifyRoutine(CreateThreadNotifyRoutine);
 	PsSetCreateProcessNotifyRoutineEx(PsCreateProcessNotify, FALSE);
-	EnableObRegisterCallBack();
 
 	PLDR_DATA_TABLE_ENTRY CurDriverEntry = (PLDR_DATA_TABLE_ENTRY)pDriverObject->DriverSection;
 	PLDR_DATA_TABLE_ENTRY NextDriverEntry = (PLDR_DATA_TABLE_ENTRY)CurDriverEntry->InLoadOrderLinks.Flink;
@@ -491,8 +471,12 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject,
 	pDriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = IoControl;
 	pDriverObject->DriverUnload = UnloadDriver;
 
+	EnableObRegisterCallBack();
+
 	pDeviceObject->Flags |= DO_DIRECT_IO;
 	pDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+
+	return STATUS_SUCCESS;
 }
 
 
@@ -500,7 +484,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject,
 NTSTATUS UnloadDriver(PDRIVER_OBJECT pDriverObject)
 {
 	DbgPrintEx(0, 0, "SAC Unload routine called.\n");
-	ObUnRegisterCallbacks(ObHandle);
+	if (ObHandle != NULL)
+	{
+		ObUnRegisterCallbacks(ObHandle);
+	}
 	PsRemoveLoadImageNotifyRoutine(ImageLoadCallback);
 	PsRemoveCreateThreadNotifyRoutine(CreateThreadNotifyRoutine);
 	PsSetCreateProcessNotifyRoutineEx(PsCreateProcessNotify, TRUE);
